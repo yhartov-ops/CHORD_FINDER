@@ -24,10 +24,19 @@ jobs:
 
       - uses: actions/cache@v4
         with:
-          path: ~/.android/debug.keystore
-          key: debug-keystore-v1
+          path: ci-keystore
+          key: ci-keystore-v1
+
+      - name: Create signing key (first build only)
+        run: |
+          if [ ! -f ci-keystore/debug.jks ]; then
+            mkdir -p ci-keystore
+            keytool -genkeypair -keystore ci-keystore/debug.jks -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
 
       - name: Build
+        env:
+          CI_KEYSTORE: ${{ github.workspace }}/ci-keystore/debug.jks
         run: gradle assembleDebug --no-daemon
 
       - name: Rename APK
