@@ -15,6 +15,18 @@ android {
         versionName = "1.0"
     }
 
+    signingConfigs {
+        getByName("debug") {
+            val ks = System.getenv("CI_KEYSTORE")
+            if (ks != null && file(ks).exists()) {
+                storeFile = file(ks)
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
