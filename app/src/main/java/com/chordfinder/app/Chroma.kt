@@ -1,6 +1,7 @@
 package com.chordfinder.app
 
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.ln
 import kotlin.math.log10
@@ -8,10 +9,15 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
+/** One analysed block: full chroma, low-register chroma, input level. */
+class Frame(val chroma: DoubleArray, val bass: DoubleArray, val levelDb: Double) {
+    val silent: Boolean get() = chroma.sum() <= 0.0
+}
+
 /**
  * Turns a block of audio into a 12-bin pitch-class profile (chroma).
- * Uses spectral peaks with parabolic interpolation, so each peak is
- * mapped to the nearest semitone.
+ * Spectral peaks are interpolated, overtones of lower peaks are damped,
+ * and notes below ~260 Hz are also collected separately as the bass line.
  */
 class ChromaExtractor(private val sampleRate: Int, val size: Int) {
     private val window = DoubleArray(size) { 0.5 - 0.5 * cos(2 * PI * it / (size - 1)) }
@@ -24,12 +30,13 @@ class ChromaExtractor(private val sampleRate: Int, val size: Int) {
     private val minBin = (70.0 * size / sampleRate).toInt().coerceAtLeast(2)
     private val maxBin = (2500.0 * size / sampleRate).toInt().coerceAtMost(size / 2 - 2)
 
-    /** Level of the last processed block in dBFS. */
+    private val peakFreq = DoubleArray(512)
+    private val peakMag = DoubleArray(512)
+
     var levelDb = -100.0
         private set
 
-    /** Returns chroma normalised to sum 1, or all zeros when the input is silent. */
-    fun process(samples: FloatArray): DoubleArray {
+    fun process(samples: FloatArray): Frame {
         require(samples.size == size)
         var sumSq = 0.0
         for (i in 0 until size) {
@@ -41,7 +48,8 @@ class ChromaExtractor(private val sampleRate: Int, val size: Int) {
         val rms = sqrt(sumSq / size)
         levelDb = if (rms > 1e-9) 20 * log10(rms) else -100.0
         val chroma = DoubleArray(12)
-        if (levelDb < SILENCE_DB) return chroma
+        val bass = DoubleArray(12)
+        if (levelDb < SILENCE_DB) return Frame(chroma, bass, levelDb)
 
         fft()
         var peak = 0.0
@@ -50,6 +58,7 @@ class ChromaExtractor(private val sampleRate: Int, val size: Int) {
             if (k in minBin..maxBin && mag[k] > peak) peak = mag[k]
         }
         val threshold = peak * 0.04
+        var n = 0
         for (k in minBin..maxBin) {
             val b = mag[k]
             if (b < threshold || b <= mag[k - 1] || b < mag[k + 1]) continue
@@ -58,14 +67,32 @@ class ChromaExtractor(private val sampleRate: Int, val size: Int) {
             val c = ln(mag[k + 1] + 1e-12)
             val denom = a - 2 * bl + c
             val delta = if (denom != 0.0) (0.5 * (a - c) / denom).coerceIn(-0.5, 0.5) else 0.0
-            val freq = (k + delta) * sampleRate / size
-            val midi = 69 + 12 * ln(freq / 440.0) / ln(2.0)
+            if (n < peakFreq.size) {
+                peakFreq[n] = (k + delta) * sampleRate / size
+                peakMag[n] = b
+                n++
+            }
+        }
+        for (p in 0 until n) {
+            val f = peakFreq[p]
+            var w = sqrt(peakMag[p])
+            // Damp a peak that is the 2nd-5th overtone of a stronger lower peak
+            for (q in 0 until p) {
+                if (peakMag[q] < peakMag[p] * 0.5) continue
+                val ratio = f / peakFreq[q]
+                val h = ratio.roundToInt()
+                if (h in 2..8 && abs(ratio - h) < 0.03 * h) { w *= 0.4; break }
+            }
+            val midi = 69 + 12 * ln(f / 440.0) / ln(2.0)
             val pc = ((midi.roundToInt() % 12) + 12) % 12
-            chroma[pc] += sqrt(b)
+            chroma[pc] += w
+            if (f < 260) bass[pc] += w
         }
         val total = chroma.sum()
         if (total > 0) for (i in 0 until 12) chroma[i] /= total
-        return chroma
+        val bt = bass.sum()
+        if (bt > 0) for (i in 0 until 12) bass[i] /= bt
+        return Frame(chroma, bass, levelDb)
     }
 
     private fun fft() {
@@ -110,13 +137,26 @@ class ChromaExtractor(private val sampleRate: Int, val size: Int) {
     }
 }
 
+/** How quickly the shown chord may change. */
+enum class Stability(
+    val hebrew: String,
+    val alpha: Double,
+    val stableFrames: Int,
+    val margin: Double,
+    val keyPrior: Double
+) {
+    FAST("מהיר", 0.35, 4, 0.0, 1.04),
+    NORMAL("רגיל", 0.22, 6, 0.03, 1.05),
+    SONG("שיר מלא", 0.16, 7, 0.05, 1.08)
+}
+
 /** Combines frames over time: a long memory for the key and a short one for the chord. */
 class HarmonyTracker {
     val keyChroma = DoubleArray(12)
     val chordChroma = DoubleArray(12)
-    var lastFrame = DoubleArray(12)
-        private set
+    val bassChroma = DoubleArray(12)
 
+    var stability = Stability.NORMAL
     var lockedKey: Key? = null
     var keyRanking: List<KeyResult> = emptyList()
         private set
@@ -134,6 +174,7 @@ class HarmonyTracker {
     fun reset() {
         keyChroma.fill(0.0)
         chordChroma.fill(0.0)
+        bassChroma.fill(0.0)
         keyRanking = emptyList()
         currentChord = null
         history.clear()
@@ -141,34 +182,43 @@ class HarmonyTracker {
         candidateCount = 0
     }
 
-    fun add(frame: DoubleArray) {
-        lastFrame = frame
-        val silent = frame.sum() <= 0.0
-        if (silent) {
+    fun add(frame: Frame) {
+        if (frame.silent) {
             silentFrames++
-            for (i in 0 until 12) chordChroma[i] *= 0.7
+            for (i in 0 until 12) { chordChroma[i] *= 0.7; bassChroma[i] *= 0.7 }
             if (silentFrames > 6) currentChord = null
             return
         }
         silentFrames = 0
+        val a = stability.alpha
         for (i in 0 until 12) {
-            keyChroma[i] = keyChroma[i] * KEY_DECAY + frame[i]
-            chordChroma[i] = chordChroma[i] * (1 - CHORD_ALPHA) + frame[i] * CHORD_ALPHA
+            keyChroma[i] = keyChroma[i] * KEY_DECAY + frame.chroma[i]
+            chordChroma[i] = chordChroma[i] * (1 - a) + frame.chroma[i] * a
+            bassChroma[i] = bassChroma[i] * (1 - a) + frame.bass[i] * a
         }
         keyRanking = KeyDetector.rank(keyChroma)
+        val k = key
 
-        val best = ChordDetector.best(chordChroma, key) ?: return
+        val best = ChordDetector.best(chordChroma, bassChroma, k, stability.keyPrior) ?: return
         if (best.score < MIN_CHORD_SCORE) return
+        val cur = currentChord
+        if (cur != null && cur.chord != best.chord) {
+            // Hysteresis: the new chord must clearly beat the one on screen
+            val curScore = ChordDetector.scoreOf(cur.chord, chordChroma, bassChroma, k, stability.keyPrior)
+            if (best.score < curScore + stability.margin) {
+                candidate = null
+                candidateCount = 0
+                return
+            }
+        }
         if (best.chord == candidate) candidateCount++ else {
             candidate = best.chord
             candidateCount = 1
         }
-        if (candidateCount >= STABLE_FRAMES) {
-            if (currentChord?.chord != best.chord) {
-                if (history.lastOrNull() != best.chord) {
-                    history.add(best.chord)
-                    if (history.size > 16) history.removeAt(0)
-                }
+        if (candidateCount >= stability.stableFrames || cur == null && candidateCount >= 2) {
+            if (cur?.chord != best.chord && history.lastOrNull() != best.chord) {
+                history.add(best.chord)
+                if (history.size > 16) history.removeAt(0)
             }
             currentChord = best
         }
@@ -176,8 +226,6 @@ class HarmonyTracker {
 
     companion object {
         const val KEY_DECAY = 0.997      // about 30 seconds of memory
-        const val CHORD_ALPHA = 0.35
         const val MIN_CHORD_SCORE = 0.72
-        const val STABLE_FRAMES = 4
     }
 }

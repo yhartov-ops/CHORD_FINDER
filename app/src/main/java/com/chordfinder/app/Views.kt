@@ -32,7 +32,7 @@ class PianoView(context: Context) : View(context) {
     /** Pitch classes to tint softly (scale tones). */
     var scalePcs: Set<Int> = emptySet()
         set(v) { field = v; invalidate() }
-    var flats: Boolean? = null
+    var spelling: Spelling = Spelling.NEUTRAL
         set(v) { field = v; invalidate() }
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -92,7 +92,7 @@ class PianoView(context: Context) : View(context) {
         val old = text.textSize
         if (!white) text.textSize = old * 0.8f
         text.color = if (semi in chordNotes || white) Palette.EBONY else Palette.TEXT
-        canvas.drawText(Notes.name(pc, flats), x, y, text)
+        canvas.drawText(spelling.name(pc), x, y, text)
         text.textSize = old
     }
 }
@@ -103,7 +103,7 @@ class GuitarView(context: Context) : View(context) {
         set(v) { field = v; invalidate() }
     var rootPc: Int? = null
         set(v) { field = v; invalidate() }
-    var flats: Boolean? = null
+    var spelling: Spelling = Spelling.NEUTRAL
         set(v) { field = v; invalidate() }
 
     private val line = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Palette.MUTED; style = Paint.Style.STROKE }
@@ -112,18 +112,18 @@ class GuitarView(context: Context) : View(context) {
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val w = MeasureSpec.getSize(widthMeasureSpec)
-        setMeasuredDimension(w, (w * 0.9f).coerceAtMost(context.dp(320f)).toInt())
+        setMeasuredDimension(w, (w * 1.3f).toInt())
     }
 
     override fun onDraw(canvas: Canvas) {
         val v = voicing ?: return
-        val h = height.toFloat()
-        val gridH = h * 0.68f
-        val gridW = gridH * 0.85f
-        val left = (width - gridW) / 2
-        val top = h * 0.14f
+        val w = width.toFloat()
+        val gridW = w * 0.7f
+        val left = w * 0.2f
         val sx = gridW / 5f
-        val fy = gridH / 5f
+        val fy = sx * 1.25f
+        val gridH = fy * 5f
+        val top = fy * 0.9f
         val fretted = v.frets.filter { it > 0 }
         val maxF = fretted.maxOrNull() ?: 0
         val start = if (maxF <= 5) 1 else fretted.min()
@@ -135,9 +135,11 @@ class GuitarView(context: Context) : View(context) {
             fill.color = Palette.TEXT
             canvas.drawRect(left - context.dp(1f), top - context.dp(5f), left + gridW + context.dp(1f), top, fill)
         } else {
-            text.textSize = fy * 0.42f
+            text.textSize = maxOf(fy * 0.5f, context.dp(10f))
             text.textAlign = Paint.Align.RIGHT
-            canvas.drawText("$start", left - context.dp(10f), top + fy * 0.62f, text)
+            text.color = Palette.MUTED
+            canvas.drawText("$start", left - context.dp(5f), top + fy * 0.65f, text)
+            text.color = Palette.TEXT
             text.textAlign = Paint.Align.CENTER
         }
 
@@ -151,13 +153,13 @@ class GuitarView(context: Context) : View(context) {
             )
         }
 
-        text.textSize = fy * 0.36f
+        text.textSize = maxOf(fy * 0.42f, context.dp(9f))
         for (s in 0 until 6) {
             val x = left + s * sx
             val f = v.frets[s]
             val pc = if (f >= 0) (GuitarChords.OPEN[s] + f) % 12 else -1
             when {
-                f < 0 -> { text.color = Palette.MUTED; canvas.drawText("✕", x, top - fy * 0.3f, text) }
+                f < 0 -> { text.color = Palette.MUTED; canvas.drawText("✕", x, top - fy * 0.25f, text) }
                 f == 0 -> {
                     line.color = if (pc == rootPc) Palette.AMBER else Palette.TEXT
                     canvas.drawCircle(x, top - fy * 0.42f, dotR * 0.55f, line)
@@ -171,7 +173,7 @@ class GuitarView(context: Context) : View(context) {
             }
             if (pc >= 0) {
                 text.color = if (pc == rootPc) Palette.AMBER else Palette.MUTED
-                canvas.drawText(Notes.name(pc, flats), x, top + gridH + fy * 0.6f, text)
+                canvas.drawText(spelling.name(pc), x, top + gridH + fy * 0.62f, text)
             }
         }
         text.color = Palette.TEXT
@@ -182,7 +184,7 @@ class GuitarView(context: Context) : View(context) {
 class ChromaView(context: Context) : View(context) {
     private var values = DoubleArray(12)
     private var level = 0f
-    var flats: Boolean? = null
+    var spelling: Spelling = Spelling.NEUTRAL
     var scalePcs: Set<Int> = emptySet()
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -211,7 +213,7 @@ class ChromaView(context: Context) : View(context) {
             fill.color = if (i in scalePcs) Palette.TEAL else Palette.SURFACE_2
             val x = i * bw
             canvas.drawRoundRect(RectF(x + bw * 0.15f, barArea - bh, x + bw * 0.85f, barArea), 6f, 6f, fill)
-            canvas.drawText(Notes.name(i, flats), x + bw / 2, h - context.dp(4f), text)
+            canvas.drawText(spelling.name(i), x + bw / 2, h - context.dp(4f), text)
         }
         fill.color = Palette.SURFACE_2
         canvas.drawRect(0f, barArea + context.dp(3f), w, barArea + context.dp(5f), fill)

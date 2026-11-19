@@ -10,7 +10,7 @@ import android.media.MediaRecorder
  * vector and the input level roughly ten times per second.
  */
 class AudioCapture(
-    private val onFrame: (DoubleArray, Double) -> Unit,
+    private val onFrame: (Frame) -> Unit,
     private val onError: (String) -> Unit
 ) {
     private val sampleRate = 44100
@@ -72,8 +72,7 @@ class AudioCapture(
                     for (i in 0 until hop) window[size - hop + i] = buf[i] / 32768f
                     filled = minOf(size, filled + hop)
                     if (filled < size) continue
-                    val chroma = extractor.process(window)
-                    onFrame(chroma, extractor.levelDb)
+                    onFrame(extractor.process(window))
                 }
             } finally {
                 try { recorder.stop() } catch (_: Exception) {}

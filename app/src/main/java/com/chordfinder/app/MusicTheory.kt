@@ -1,78 +1,191 @@
 package com.chordfinder.app
 
+import kotlin.math.abs
 import kotlin.math.sqrt
 
-enum class Quality(val suffix: String, val intervals: IntArray, val bias: Double, val hebrew: String) {
-    MAJ("", intArrayOf(0, 4, 7), 1.00, "מז'ור"),
-    MIN("m", intArrayOf(0, 3, 7), 1.00, "מינור"),
-    DIM("dim", intArrayOf(0, 3, 6), 0.93, "מוקטן"),
-    DOM7("7", intArrayOf(0, 4, 7, 10), 0.97, "דומיננט 7"),
-    MAJ7("maj7", intArrayOf(0, 4, 7, 11), 0.93, "מז'ור 7"),
-    MIN7("m7", intArrayOf(0, 3, 7, 10), 0.95, "מינור 7"),
-    M7B5("m7b5", intArrayOf(0, 3, 6, 10), 0.92, "חצי מוקטן"),
-    SUS4("sus4", intArrayOf(0, 5, 7), 0.92, "sus4"),
-    SUS2("sus2", intArrayOf(0, 2, 7), 0.90, "sus2");
+enum class Quality(
+    val suffix: String,
+    val intervals: IntArray,
+    val bias: Double,
+    val hebrew: String,
+    val detect: Boolean
+) {
+    MAJ("", intArrayOf(0, 4, 7), 1.00, "מז'ור", true),
+    MIN("m", intArrayOf(0, 3, 7), 1.00, "מינור", true),
+    DIM("dim", intArrayOf(0, 3, 6), 0.93, "מוקטן", true),
+    AUG("aug", intArrayOf(0, 4, 8), 0.90, "מוגדל", false),
+    DOM7("7", intArrayOf(0, 4, 7, 10), 0.97, "דומיננט 7", true),
+    MAJ7("maj7", intArrayOf(0, 4, 7, 11), 0.93, "מז'ור 7", true),
+    MIN7("m7", intArrayOf(0, 3, 7, 10), 0.95, "מינור 7", true),
+    M7B5("m7b5", intArrayOf(0, 3, 6, 10), 0.92, "חצי מוקטן", true),
+    DIM7("dim7", intArrayOf(0, 3, 6, 9), 0.90, "מוקטן 7", false),
+    MMAJ7("m(maj7)", intArrayOf(0, 3, 7, 11), 0.90, "מינור מז'ור 7", false),
+    AUGMAJ7("maj7#5", intArrayOf(0, 4, 8, 11), 0.90, "מז'ור 7 מוגדל", false),
+    SUS4("sus4", intArrayOf(0, 5, 7), 0.92, "sus4", true),
+    SUS2("sus2", intArrayOf(0, 2, 7), 0.90, "sus2", true),
+    SEVSUS4("7sus4", intArrayOf(0, 5, 7, 10), 0.90, "7sus4", false),
+    SIX("6", intArrayOf(0, 4, 7, 9), 0.90, "מז'ור 6", false),
+    MIN6("m6", intArrayOf(0, 3, 7, 9), 0.90, "מינור 6", false),
+    ADD9("add9", intArrayOf(0, 4, 7, 14), 0.90, "add9", false),
+    NINE("9", intArrayOf(0, 4, 7, 10, 14), 0.90, "דומיננט 9", false),
+    MAJ9("maj9", intArrayOf(0, 4, 7, 11, 14), 0.90, "מז'ור 9", false),
+    MIN9("m9", intArrayOf(0, 3, 7, 10, 14), 0.90, "מינור 9", false);
+
+    val pcSet: Set<Int> get() = intervals.map { it % 12 }.toSet()
 }
 
 data class Chord(val root: Int, val quality: Quality) {
-    fun name(flats: Boolean?): String = Notes.name(root, flats) + quality.suffix
+    fun name(sp: Spelling): String = sp.name(root) + quality.suffix
     fun pitchClasses(): List<Int> = quality.intervals.map { (root + it) % 12 }
 }
 
-data class Key(val tonic: Int, val minor: Boolean) {
-    /** Keys conventionally written with flats. */
-    val useFlats: Boolean
-        get() {
-            val major = if (minor) (tonic + 3) % 12 else tonic
-            return major in setOf(5, 10, 3, 8, 1)
-        }
+/** Note naming: spelled names for scale tones, sharps/flats/neutral for the rest. */
+class Spelling(private val names: Map<Int, String>, val flats: Boolean?) {
+    fun name(pc: Int): String = names[((pc % 12) + 12) % 12] ?: Notes.name(pc, flats)
 
-    fun name(): String = Notes.name(tonic, useFlats) + " " + (if (minor) "מינור" else "מז'ור")
-    fun shortName(): String = Notes.name(tonic, useFlats) + (if (minor) "m" else "")
+    companion object {
+        val NEUTRAL = Spelling(emptyMap(), null)
+    }
+}
 
-    fun scale(): List<Int> {
-        val steps = if (minor) MINOR_STEPS else MAJOR_STEPS
-        return steps.map { (tonic + it) % 12 }
+enum class ScaleType(
+    val hebrew: String,
+    val description: String,
+    val steps: IntArray,
+    /** Degrees (0-based) that are really a quarter tone lower than written. */
+    val quarterFlat: Set<Int> = emptySet(),
+    /** Extra fit required before auto-detection prefers it over plain major/minor; null = never auto-detected. */
+    val margin: Double? = 0.04
+) {
+    MAJOR("מז'ור", "עג'ם", intArrayOf(0, 2, 4, 5, 7, 9, 11), margin = 0.0),
+    MINOR("מינור", "מינור טבעי", intArrayOf(0, 2, 3, 5, 7, 8, 10), margin = 0.0),
+    HARMONIC_MINOR("מינור הרמוני", "נהוונד", intArrayOf(0, 2, 3, 5, 7, 8, 11), margin = 0.08),
+    HIJAZ("חיג'אז", "אהבה רבה, פריגי דומיננטי", intArrayOf(0, 1, 4, 5, 7, 8, 10)),
+    HIJAZ_KAR("חיג'אז כאר", "הרמוני כפול", intArrayOf(0, 1, 4, 5, 7, 8, 11), margin = 0.10),
+    KURD("כורד", "פריגי", intArrayOf(0, 1, 3, 5, 7, 8, 10)),
+    NIKRIZ("ניכריז", "", intArrayOf(0, 2, 3, 6, 7, 9, 10), margin = 0.06),
+    DORIAN("דורי", "", intArrayOf(0, 2, 3, 5, 7, 9, 10), margin = 0.06),
+    MIXOLYDIAN("מיקסולידי", "", intArrayOf(0, 2, 4, 5, 7, 9, 10), margin = 0.06),
+    RAST("ראסט", "קירוב, רבעי טון", intArrayOf(0, 2, 4, 5, 7, 9, 11), setOf(2, 6), null),
+    BAYATI("ביאתי", "קירוב, רבע טון", intArrayOf(0, 2, 3, 5, 7, 8, 10), setOf(1), null),
+    SABA("סבא", "קירוב, רבע טון", intArrayOf(0, 2, 3, 4, 7, 8, 10), setOf(1), null);
+}
+
+data class Key(val tonic: Int, val type: ScaleType) {
+    val spelling: Spelling by lazy { Speller.spell(tonic, type.steps) }
+    val useFlats: Boolean? get() = spelling.flats
+
+    fun name(): String = spelling.name(tonic) + " " + type.hebrew
+    fun scale(): List<Int> = type.steps.map { (tonic + it) % 12 }
+
+    /** Scale notes for display; quarter-tone degrees get a ↓ mark. */
+    fun scaleText(): String = type.steps.indices.joinToString("  ") { i ->
+        spelling.name((tonic + type.steps[i]) % 12) + if (i in type.quarterFlat) "↓" else ""
     }
 
-    /** Diatonic chords: numeral, triad, seventh chord. */
-    fun diatonic(): List<Triple<String, Chord, Chord>> {
+    /** Chords built by stacking thirds on each degree: numeral, triad, seventh chord. */
+    fun diatonic(): List<Triple<String, Chord, Chord>> = cached
+
+    private val cached: List<Triple<String, Chord, Chord>> by lazy {
+        val s = type.steps
         val out = ArrayList<Triple<String, Chord, Chord>>()
-        if (!minor) {
-            val numerals = listOf("I", "ii", "iii", "IV", "V", "vi", "vii°")
-            val triads = listOf(Quality.MAJ, Quality.MIN, Quality.MIN, Quality.MAJ, Quality.MAJ, Quality.MIN, Quality.DIM)
-            val sevenths = listOf(Quality.MAJ7, Quality.MIN7, Quality.MIN7, Quality.MAJ7, Quality.DOM7, Quality.MIN7, Quality.M7B5)
-            for (i in 0 until 7) {
-                val r = (tonic + MAJOR_STEPS[i]) % 12
-                out.add(Triple(numerals[i], Chord(r, triads[i]), Chord(r, sevenths[i])))
-            }
-        } else {
-            val numerals = listOf("i", "ii°", "III", "iv", "v", "VI", "VII")
-            val triads = listOf(Quality.MIN, Quality.DIM, Quality.MAJ, Quality.MIN, Quality.MIN, Quality.MAJ, Quality.MAJ)
-            val sevenths = listOf(Quality.MIN7, Quality.M7B5, Quality.MAJ7, Quality.MIN7, Quality.MIN7, Quality.MAJ7, Quality.DOM7)
-            for (i in 0 until 7) {
-                val r = (tonic + MINOR_STEPS[i]) % 12
-                out.add(Triple(numerals[i], Chord(r, triads[i]), Chord(r, sevenths[i])))
-            }
-            // Harmonic-minor dominant, very common in practice
+        for (i in 0 until 7) {
+            fun st(k: Int) = s[(i + k) % 7] + if (i + k >= 7) 12 else 0
+            val triadQ = Theory.classify(listOf(0, st(2) - s[i], st(4) - s[i])) ?: continue
+            val seventhQ = Theory.classify(listOf(0, st(2) - s[i], st(4) - s[i], st(6) - s[i])) ?: triadQ
+            val root = (tonic + s[i]) % 12
+            out.add(Triple(Theory.numeral(i, s[i], triadQ), Chord(root, triadQ), Chord(root, seventhQ)))
+        }
+        if (type == ScaleType.MINOR) {
             val v = (tonic + 7) % 12
             out.add(Triple("V", Chord(v, Quality.MAJ), Chord(v, Quality.DOM7)))
         }
-        return out
+        out
     }
 
-    /** Roman numeral of a chord within this key, or null if not diatonic. */
     fun numeralOf(chord: Chord): String? {
-        for ((num, triad, seventh) in diatonic()) {
-            if (triad == chord || seventh == chord) return num
-        }
+        for ((num, triad, seventh) in diatonic()) if (triad == chord || seventh == chord) return num
         return null
     }
 
     companion object {
-        val MAJOR_STEPS = intArrayOf(0, 2, 4, 5, 7, 9, 11)
-        val MINOR_STEPS = intArrayOf(0, 2, 3, 5, 7, 8, 10)
-        fun all(): List<Key> = (0 until 12).flatMap { listOf(Key(it, false), Key(it, true)) }
+        fun major(t: Int) = Key(t, ScaleType.MAJOR)
+        fun minor(t: Int) = Key(t, ScaleType.MINOR)
+    }
+}
+
+object Theory {
+    private val TERTIAN = listOf(
+        Quality.MAJ, Quality.MIN, Quality.DIM, Quality.AUG,
+        Quality.DOM7, Quality.MAJ7, Quality.MIN7, Quality.M7B5, Quality.DIM7, Quality.MMAJ7, Quality.AUGMAJ7
+    )
+
+    fun classify(intervals: List<Int>): Quality? {
+        val set = intervals.map { ((it % 12) + 12) % 12 }.toSet()
+        return TERTIAN.firstOrNull { it.intervals.size == intervals.size && it.pcSet == set }
+    }
+
+    private val ROMAN = arrayOf("I", "II", "III", "IV", "V", "VI", "VII")
+    private val MAJOR_REF = intArrayOf(0, 2, 4, 5, 7, 9, 11)
+
+    fun numeral(degree: Int, step: Int, q: Quality): String {
+        val acc = when (step - MAJOR_REF[degree]) {
+            -2 -> "bb"; -1 -> "b"; 1 -> "#"; 2 -> "##"; else -> ""
+        }
+        val lower = q == Quality.MIN || q == Quality.DIM
+        val base = if (lower) ROMAN[degree].lowercase() else ROMAN[degree]
+        val suffix = when (q) {
+            Quality.DIM -> "°"
+            Quality.AUG -> "+"
+            else -> ""
+        }
+        return acc + base + suffix
+    }
+}
+
+/** Gives each scale degree its own letter (D Eb F# G A Bb C rather than D D# F# ...). */
+object Speller {
+    private const val LETTERS = "CDEFGAB"
+    private val NATURAL = intArrayOf(0, 2, 4, 5, 7, 9, 11)
+
+    fun spell(tonic: Int, steps: IntArray): Spelling {
+        var bestNames: Map<Int, String>? = null
+        var bestCost = Int.MAX_VALUE
+        for (letter in 0 until 7) {
+            val tAcc = norm(tonic - NATURAL[letter])
+            if (abs(tAcc) > 1) continue
+            val names = HashMap<Int, String>()
+            var cost = 0
+            var ok = true
+            for (i in steps.indices) {
+                val l = (letter + i) % 7
+                val pc = (tonic + steps[i]) % 12
+                val acc = norm(pc - NATURAL[l])
+                if (abs(acc) > 2) { ok = false; break }
+                cost += abs(acc) + if (abs(acc) == 2) 4 else 0
+                names[pc] = LETTERS[l] + accidental(acc)
+            }
+            if (ok && (cost < bestCost || cost == bestCost && tAcc < 0)) { bestCost = cost; bestNames = names }
+        }
+        val names = bestNames ?: emptyMap()
+        val flatCount = names.values.count { it.contains('b') }
+        val sharpCount = names.values.count { it.contains('#') }
+        val flats: Boolean? = when {
+            flatCount > sharpCount -> true
+            sharpCount > flatCount -> false
+            else -> null
+        }
+        return Spelling(names, flats)
+    }
+
+    private fun norm(d: Int): Int {
+        var x = ((d % 12) + 12) % 12
+        if (x > 6) x -= 12
+        return x
+    }
+
+    private fun accidental(a: Int) = when (a) {
+        -2 -> "bb"; -1 -> "b"; 1 -> "#"; 2 -> "##"; else -> ""
     }
 }
 
@@ -94,24 +207,58 @@ object Notes {
 data class KeyResult(val key: Key, val score: Double)
 
 object KeyDetector {
-    // Krumhansl-Kessler key profiles
+    // Krumhansl-Kessler profiles: the most reliable choice between major and minor
     private val MAJOR = doubleArrayOf(6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)
     private val MINOR = doubleArrayOf(6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17)
 
-    /** Returns all 24 keys sorted by correlation (best first), or empty if no signal. */
+    /** All candidates sorted best first. Other scales win only when they clearly fit better. */
     fun rank(chroma: DoubleArray): List<KeyResult> {
         if (chroma.sum() <= 1e-9) return emptyList()
-        val res = ArrayList<KeyResult>(24)
+        val kk = ArrayList<KeyResult>(24)
         for (t in 0 until 12) {
-            res.add(KeyResult(Key(t, false), correlate(chroma, MAJOR, t)))
-            res.add(KeyResult(Key(t, true), correlate(chroma, MINOR, t)))
+            kk.add(KeyResult(Key.major(t), correlate(chroma, rotate(MAJOR, t))))
+            kk.add(KeyResult(Key.minor(t), correlate(chroma, rotate(MINOR, t))))
         }
-        res.sortByDescending { it.score }
-        return res
+        kk.sortByDescending { it.score }
+
+        // Same yardstick for every scale, so they can be compared fairly
+        var bestPlain = -1.0
+        var bestOther: KeyResult? = null
+        var bestOtherGain = 0.0
+        for (type in ScaleType.values()) {
+            val margin = type.margin ?: continue
+            for (t in 0 until 12) {
+                val s = correlate(chroma, template(type, t))
+                if (type == ScaleType.MAJOR || type == ScaleType.MINOR) {
+                    if (s > bestPlain) bestPlain = s
+                } else {
+                    val gain = s - margin
+                    if (bestOther == null || gain > bestOtherGain) {
+                        bestOther = KeyResult(Key(t, type), s)
+                        bestOtherGain = gain
+                    }
+                }
+            }
+        }
+        return if (bestOther != null && bestOtherGain > bestPlain) listOf(bestOther) + kk else kk
     }
 
-    private fun correlate(x: DoubleArray, profile: DoubleArray, shift: Int): Double {
-        val y = DoubleArray(12) { profile[((it - shift) % 12 + 12) % 12] }
+    private fun template(type: ScaleType, tonic: Int): DoubleArray {
+        val t = DoubleArray(12)
+        type.steps.forEachIndexed { i, st ->
+            t[(tonic + st) % 12] = when {
+                i == 0 -> 3.0
+                st == 7 -> 2.0
+                i == 2 -> 1.5
+                else -> 1.0
+            }
+        }
+        return t
+    }
+
+    private fun rotate(p: DoubleArray, shift: Int) = DoubleArray(12) { p[((it - shift) % 12 + 12) % 12] }
+
+    private fun correlate(x: DoubleArray, y: DoubleArray): Double {
         val mx = x.average()
         val my = y.average()
         var num = 0.0
@@ -132,22 +279,89 @@ object KeyDetector {
 data class ChordResult(val chord: Chord, val score: Double)
 
 object ChordDetector {
-    fun best(chroma: DoubleArray, key: Key?): ChordResult? {
+    /**
+     * Scores every detectable chord against the chroma. [bass] (low-register chroma) adds
+     * weight to chords whose root is the bass note; [keyPrior] favours chords of the key.
+     */
+    fun score(chord: Chord, chroma: DoubleArray, norm: Double, bassPc: Int, diatonic: Set<Chord>, keyPrior: Double): Double {
+        var dot = 0.0
+        for (iv in chord.quality.intervals) dot += chroma[(chord.root + iv) % 12]
+        var s = dot / (norm * sqrt(chord.quality.intervals.size.toDouble())) * chord.quality.bias
+        if (chord in diatonic) s *= keyPrior
+        if (bassPc == chord.root) s *= 1.06
+        return s
+    }
+
+    fun best(chroma: DoubleArray, bass: DoubleArray?, key: Key?, keyPrior: Double = 1.04): ChordResult? {
         val norm = sqrt(chroma.sumOf { it * it })
         if (norm < 1e-9) return null
-        val diatonic = key?.diatonic()?.flatMap { listOf(it.second, it.third) }?.toSet() ?: emptySet()
+        val bassPc = bassPc(bass)
+        val diatonic = diatonicSet(key)
         var best: ChordResult? = null
-        for (root in 0 until 12) {
-            for (q in Quality.values()) {
-                var dot = 0.0
-                for (iv in q.intervals) dot += chroma[(root + iv) % 12]
-                // Cosine similarity with a binary template
-                var score = dot / (norm * sqrt(q.intervals.size.toDouble())) * q.bias
-                val chord = Chord(root, q)
-                if (chord in diatonic) score *= 1.04
-                if (best == null || score > best.score) best = ChordResult(chord, score)
-            }
+        for (root in 0 until 12) for (q in Quality.values()) {
+            if (!q.detect) continue
+            val c = Chord(root, q)
+            val s = score(c, chroma, norm, bassPc, diatonic, keyPrior)
+            if (best == null || s > best.score) best = ChordResult(c, s)
         }
         return best
+    }
+
+    fun scoreOf(chord: Chord, chroma: DoubleArray, bass: DoubleArray?, key: Key?, keyPrior: Double): Double {
+        val norm = sqrt(chroma.sumOf { it * it })
+        if (norm < 1e-9) return 0.0
+        return score(chord, chroma, norm, bassPc(bass), diatonicSet(key), keyPrior)
+    }
+
+    private fun diatonicSet(key: Key?) = key?.diatonic()?.flatMap { listOf(it.second, it.third) }?.toSet() ?: emptySet()
+
+    private fun bassPc(bass: DoubleArray?): Int {
+        if (bass == null) return -1
+        var bi = -1
+        var bv = 0.0
+        for (i in 0 until 12) if (bass[i] > bv) { bv = bass[i]; bi = i }
+        // Only trust a clearly dominant bass note
+        val total = bass.sum()
+        return if (total > 0 && bv / total > 0.35) bi else -1
+    }
+}
+
+object ChordParser {
+    private val SUFFIXES: Map<String, Quality> = linkedMapOf(
+        "" to Quality.MAJ, "maj" to Quality.MAJ, "M" to Quality.MAJ, "major" to Quality.MAJ,
+        "m" to Quality.MIN, "min" to Quality.MIN, "-" to Quality.MIN, "minor" to Quality.MIN,
+        "dim" to Quality.DIM, "°" to Quality.DIM, "o" to Quality.DIM,
+        "aug" to Quality.AUG, "+" to Quality.AUG, "#5" to Quality.AUG,
+        "7" to Quality.DOM7, "dom7" to Quality.DOM7,
+        "maj7" to Quality.MAJ7, "M7" to Quality.MAJ7, "Δ" to Quality.MAJ7, "Δ7" to Quality.MAJ7, "ma7" to Quality.MAJ7,
+        "m7" to Quality.MIN7, "min7" to Quality.MIN7, "-7" to Quality.MIN7,
+        "m7b5" to Quality.M7B5, "ø" to Quality.M7B5, "ø7" to Quality.M7B5, "min7b5" to Quality.M7B5, "-7b5" to Quality.M7B5,
+        "dim7" to Quality.DIM7, "°7" to Quality.DIM7, "o7" to Quality.DIM7,
+        "m(maj7)" to Quality.MMAJ7, "mmaj7" to Quality.MMAJ7, "mM7" to Quality.MMAJ7, "minmaj7" to Quality.MMAJ7,
+        "maj7#5" to Quality.AUGMAJ7, "+maj7" to Quality.AUGMAJ7, "augmaj7" to Quality.AUGMAJ7,
+        "sus4" to Quality.SUS4, "sus" to Quality.SUS4, "sus2" to Quality.SUS2,
+        "7sus4" to Quality.SEVSUS4, "7sus" to Quality.SEVSUS4,
+        "6" to Quality.SIX, "maj6" to Quality.SIX, "m6" to Quality.MIN6, "min6" to Quality.MIN6,
+        "add9" to Quality.ADD9, "add2" to Quality.ADD9,
+        "9" to Quality.NINE, "maj9" to Quality.MAJ9, "M9" to Quality.MAJ9, "m9" to Quality.MIN9, "min9" to Quality.MIN9
+    )
+    private val LETTER_PC = mapOf('C' to 0, 'D' to 2, 'E' to 4, 'F' to 5, 'G' to 7, 'A' to 9, 'B' to 11)
+
+    fun parse(input: String): Chord? {
+        val s = input.trim().replace(" ", "").replace('♯', '#').replace('♭', 'b')
+        if (s.isEmpty()) return null
+        val letter = s[0].uppercaseChar()
+        var pc = LETTER_PC[letter] ?: return null
+        var i = 1
+        while (i < s.length && (s[i] == '#' || s[i] == 'b')) {
+            // "Bb" is B-flat, but in "Cb5"-like typos we still read b as flat
+            pc += if (s[i] == '#') 1 else -1
+            i++
+        }
+        val suffix = s.substring(i)
+        val q = SUFFIXES[suffix]
+            ?: SUFFIXES.entries.firstOrNull { it.key.equals(suffix, ignoreCase = true) && it.key != "M" }?.value
+            ?: return null
+        return Chord(((pc % 12) + 12) % 12, q)
     }
 }

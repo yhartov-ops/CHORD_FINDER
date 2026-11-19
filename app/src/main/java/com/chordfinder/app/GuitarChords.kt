@@ -1,92 +1,145 @@
 package com.chordfinder.app
 
+import kotlin.math.abs
+
 /**
  * A guitar voicing. frets[0] is the low E string, frets[5] the high E string.
  * -1 = muted, 0 = open. barreFret > 0 draws a barre across barreFrom..barreTo.
  */
-data class GuitarVoicing(
+class GuitarVoicing(
     val frets: IntArray,
     val barreFret: Int = 0,
     val barreFrom: Int = 0,
-    val barreTo: Int = 0
-)
+    val barreTo: Int = 0,
+    val cost: Double = 0.0
+) {
+    val bassString: Int get() = frets.indexOfFirst { it >= 0 }
+    val position: Int get() = frets.filter { it > 0 }.minOrNull() ?: 0
+}
 
 object GuitarChords {
     const val X = -1
-    private const val M = Int.MIN_VALUE // muted, inside relative shapes
 
     /** Open-string pitch classes, low E to high E. */
     val OPEN = intArrayOf(4, 9, 2, 7, 11, 4)
 
-    // Familiar open-position voicings, keyed by "root:quality".
-    private val OPEN_CHORDS: Map<String, IntArray> = mapOf(
-        "0:MAJ" to intArrayOf(X, 3, 2, 0, 1, 0),   // C
-        "0:DOM7" to intArrayOf(X, 3, 2, 3, 1, 0),  // C7
-        "0:MAJ7" to intArrayOf(X, 3, 2, 0, 0, 0),  // Cmaj7
-        "2:MAJ" to intArrayOf(X, X, 0, 2, 3, 2),   // D
-        "2:MIN" to intArrayOf(X, X, 0, 2, 3, 1),   // Dm
-        "2:DOM7" to intArrayOf(X, X, 0, 2, 1, 2),  // D7
-        "2:MAJ7" to intArrayOf(X, X, 0, 2, 2, 2),  // Dmaj7
-        "2:MIN7" to intArrayOf(X, X, 0, 2, 1, 1),  // Dm7
-        "2:SUS4" to intArrayOf(X, X, 0, 2, 3, 3),  // Dsus4
-        "2:SUS2" to intArrayOf(X, X, 0, 2, 3, 0),  // Dsus2
-        "7:MAJ" to intArrayOf(3, 2, 0, 0, 0, 3),   // G
-        "7:DOM7" to intArrayOf(3, 2, 0, 0, 0, 1),  // G7
-        "5:MAJ7" to intArrayOf(X, X, 3, 2, 1, 0),  // Fmaj7
-    )
+    private const val MAX_FRET = 15
 
-    // Movable shapes as offsets from the root fret. Root on the 6th string (E shape).
-    private val E_SHAPES: Map<Quality, IntArray> = mapOf(
-        Quality.MAJ to intArrayOf(0, 2, 2, 1, 0, 0),
-        Quality.MIN to intArrayOf(0, 2, 2, 0, 0, 0),
-        Quality.DOM7 to intArrayOf(0, 2, 0, 1, 0, 0),
-        Quality.MIN7 to intArrayOf(0, 2, 0, 0, 0, 0),
-        Quality.MAJ7 to intArrayOf(0, M, 1, 1, 0, M),
-        Quality.DIM to intArrayOf(0, 1, 2, 0, M, M),
-        Quality.M7B5 to intArrayOf(0, M, 0, 0, -1, M),
-        Quality.SUS4 to intArrayOf(0, 2, 2, 2, 0, 0),
-    )
+    private val cache = HashMap<Chord, List<GuitarVoicing>>()
 
-    // Root on the 5th string (A shape).
-    private val A_SHAPES: Map<Quality, IntArray> = mapOf(
-        Quality.MAJ to intArrayOf(M, 0, 2, 2, 2, 0),
-        Quality.MIN to intArrayOf(M, 0, 2, 2, 1, 0),
-        Quality.DOM7 to intArrayOf(M, 0, 2, 0, 2, 0),
-        Quality.MIN7 to intArrayOf(M, 0, 2, 0, 1, 0),
-        Quality.MAJ7 to intArrayOf(M, 0, 2, 1, 2, 0),
-        Quality.DIM to intArrayOf(M, 0, 1, 2, 1, M),
-        Quality.M7B5 to intArrayOf(M, 0, 1, 0, 1, M),
-        Quality.SUS4 to intArrayOf(M, 0, 2, 2, 3, 0),
-        Quality.SUS2 to intArrayOf(M, 0, 2, 2, 0, 0),
-    )
-
-    fun voicing(chord: Chord): GuitarVoicing {
-        OPEN_CHORDS["${chord.root}:${chord.quality.name}"]?.let { return GuitarVoicing(it) }
-
-        val candidates = ArrayList<GuitarVoicing>()
-        E_SHAPES[chord.quality]?.let { candidates.add(place(it, (chord.root - 4 + 12) % 12)) }
-        A_SHAPES[chord.quality]?.let { candidates.add(place(it, (chord.root - 9 + 12) % 12)) }
-        // Prefer the voicing closest to the nut
-        return candidates.minByOrNull { v -> v.frets.filter { it > 0 }.maxOrNull() ?: 0 }
-            ?: GuitarVoicing(intArrayOf(X, X, X, X, X, X))
+    /** Best voicings first, spread over different areas of the neck. */
+    fun voicings(chord: Chord, max: Int = 6): List<GuitarVoicing> {
+        val all = cache.getOrPut(chord) { search(chord) }
+        val picked = ArrayList<GuitarVoicing>()
+        for (v in all) {
+            val clash = picked.any { p ->
+                p.frets.contentEquals(v.frets) ||
+                    (p.bassString == v.bassString && abs(p.position - v.position) < 3)
+            }
+            if (!clash) picked.add(v)
+            if (picked.size >= max) break
+        }
+        return picked
     }
 
-    private fun place(shape: IntArray, rootFretIn: Int): GuitarVoicing {
-        var rootFret = rootFretIn
-        val minOffset = shape.filter { it != M }.minOrNull() ?: 0
-        if (rootFret + minOffset < 0) rootFret += 12
-        val frets = IntArray(6) { i -> if (shape[i] == M) X else shape[i] + rootFret }
-        // Barre: strings with offset 0 when the root fret is above the nut
-        if (rootFret > 0) {
-            val zero = (0 until 6).filter { shape[it] == 0 }
-            if (zero.size >= 2 && (zero.first()..zero.last()).none { shape[it] == M }) {
-                return GuitarVoicing(frets, rootFret, zero.first(), zero.last())
+    private fun search(chord: Chord): List<GuitarVoicing> {
+        val tones = chord.pitchClasses().toSet()
+        val root = chord.root
+        // The perfect fifth may be left out of chords with four or more notes
+        val optional = if (tones.size >= 4 && 7 in chord.quality.intervals) setOf((root + 7) % 12) else emptySet()
+        val required = tones - optional
+
+        val found = HashMap<String, GuitarVoicing>()
+        val options = Array(6) { IntArray(8) }
+        val counts = IntArray(6)
+        val current = IntArray(6)
+
+        fun rec(s: Int) {
+            if (s == 6) {
+                evaluate(current, root, required)?.let { v ->
+                    val key = v.frets.joinToString(",")
+                    val old = found[key]
+                    if (old == null || v.cost < old.cost) found[key] = v
+                }
+                return
+            }
+            for (i in 0 until counts[s]) {
+                current[s] = options[s][i]
+                rec(s + 1)
             }
         }
-        return GuitarVoicing(frets)
+
+        for (start in 1..(MAX_FRET - 3)) {
+            val allowOpen = start <= 3
+            for (s in 0 until 6) {
+                var c = 0
+                options[s][c++] = X
+                if (allowOpen && OPEN[s] in tones) options[s][c++] = 0
+                for (f in start..start + 3) if ((OPEN[s] + f) % 12 in tones) options[s][c++] = f
+                counts[s] = c
+            }
+            rec(0)
+        }
+        return found.values.sortedBy { it.cost }
     }
 
-    /** Pitch classes that sound for a voicing (for verification). */
+    private fun evaluate(frets: IntArray, root: Int, required: Set<Int>): GuitarVoicing? {
+        val bass = frets.indexOfFirst { it >= 0 }
+        if (bass < 0 || bass > 2) return null
+        if ((OPEN[bass] + frets[bass]) % 12 != root) return null
+
+        // Muting: at most one muted string inside the chord, plus optionally the top string
+        var innerMutes = 0
+        for (s in bass + 1 until 5) if (frets[s] < 0) innerMutes++
+        if (innerMutes > 1) return null
+        val sounding = (bass until 6).count { frets[it] >= 0 }
+        if (sounding < 4) return null
+
+        val pcs = HashSet<Int>()
+        for (s in bass until 6) if (frets[s] >= 0) pcs.add((OPEN[s] + frets[s]) % 12)
+        if (!pcs.containsAll(required)) return null
+
+        val fretted = (0 until 6).filter { frets[it] > 0 }
+        val minF = fretted.minOfOrNull { frets[it] } ?: 0
+        val maxF = fretted.maxOfOrNull { frets[it] } ?: 0
+        if (maxF - minF > 3) return null
+
+        // Fingers: a barre is possible when no open string lies under it
+        var barreFret = 0
+        var barreFrom = 0
+        var barreTo = 0
+        val atMin = fretted.filter { frets[it] == minF }
+        var fingers = fretted.size
+        if (atMin.size >= 2) {
+            val from = atMin.first()
+            val to = atMin.last()
+            val clear = (from..to).all { frets[it] != 0 }
+            if (clear) {
+                val barreFingers = 1 + fretted.count { frets[it] > minF }
+                if (fingers > 4) {
+                    fingers = barreFingers
+                    barreFret = minF
+                    barreFrom = from
+                    barreTo = to
+                }
+            }
+        }
+        if (fingers > 4) return null
+
+        val opens = (bass until 6).count { frets[it] == 0 }
+        val mutes = 6 - sounding
+        var cost = 0.0
+        cost += maxF * 0.25
+        cost += mutes * 0.8
+        cost += innerMutes * 2.0
+        cost += (maxF - minF) * 0.35
+        cost += fingers * 0.2
+        // Classic full barre shapes (E and A forms) are what players expect first
+        if (barreFret > 0 && barreFrom == bass && barreTo == 5) cost -= 0.5
+        if (maxF <= 3) cost -= opens * 0.15
+        return GuitarVoicing(frets.copyOf(), barreFret, barreFrom, barreTo, cost)
+    }
+
     fun soundingPitchClasses(v: GuitarVoicing): List<Int> =
         (0 until 6).filter { v.frets[it] >= 0 }.map { (OPEN[it] + v.frets[it]) % 12 }
 }
