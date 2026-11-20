@@ -28,7 +28,7 @@ class ChromaExtractor(private val sampleRate: Int, val size: Int) {
     private val sinT = DoubleArray(size / 2) { sin(-2 * PI * it / size) }
 
     private val minBin = (70.0 * size / sampleRate).toInt().coerceAtLeast(2)
-    private val maxBin = (2500.0 * size / sampleRate).toInt().coerceAtMost(size / 2 - 2)
+    private val maxBin = (MAX_FREQ * size / sampleRate).toInt().coerceAtMost(size / 2 - 2)
 
     private val peakFreq = DoubleArray(512)
     private val peakMag = DoubleArray(512)
@@ -75,13 +75,15 @@ class ChromaExtractor(private val sampleRate: Int, val size: Int) {
         }
         for (p in 0 until n) {
             val f = peakFreq[p]
-            var w = sqrt(peakMag[p])
-            // Damp a peak that is the 2nd-5th overtone of a stronger lower peak
+            // Lower partials are more likely to be the notes actually played
+            var w = sqrt(peakMag[p]) / (1 + f / 700.0)
+            // Damp a peak that is an overtone of a lower peak. Plucked strings often have
+            // overtones louder than the fundamental, so even a weaker parent counts.
             for (q in 0 until p) {
-                if (peakMag[q] < peakMag[p] * 0.5) continue
+                if (peakMag[q] < peakMag[p] * PARENT_RATIO) continue
                 val ratio = f / peakFreq[q]
                 val h = ratio.roundToInt()
-                if (h in 2..8 && abs(ratio - h) < 0.03 * h) { w *= 0.4; break }
+                if (h in 2..8 && abs(ratio - h) < 0.03 * h) { w *= DAMP; break }
             }
             val midi = 69 + 12 * ln(f / 440.0) / ln(2.0)
             val pc = ((midi.roundToInt() % 12) + 12) % 12
@@ -134,6 +136,9 @@ class ChromaExtractor(private val sampleRate: Int, val size: Int) {
 
     companion object {
         const val SILENCE_DB = -55.0
+        var MAX_FREQ = 1500.0
+        var PARENT_RATIO = 0.15
+        var DAMP = 0.3
     }
 }
 

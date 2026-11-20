@@ -48,27 +48,41 @@ class Spelling(private val names: Map<Int, String>, val flats: Boolean?) {
     }
 }
 
+enum class ScaleGroup(val hebrew: String) {
+    REGULAR("סולמות רגילים"),
+    EASTERN("סולמות מזרחיים (מקאמים)"),
+    MODES("מודוסים")
+}
+
 enum class ScaleType(
     val hebrew: String,
     val description: String,
+    val group: ScaleGroup,
     val steps: IntArray,
     /** Degrees (0-based) that are really a quarter tone lower than written. */
     val quarterFlat: Set<Int> = emptySet(),
     /** Extra fit required before auto-detection prefers it over plain major/minor; null = never auto-detected. */
-    val margin: Double? = 0.04
+    val margin: Double? = 0.04,
+    /** Name in the scale picker, when it differs from the short name. */
+    private val pickerName: String? = null
 ) {
-    MAJOR("מז'ור", "עג'ם", intArrayOf(0, 2, 4, 5, 7, 9, 11), margin = 0.0),
-    MINOR("מינור", "מינור טבעי", intArrayOf(0, 2, 3, 5, 7, 8, 10), margin = 0.0),
-    HARMONIC_MINOR("מינור הרמוני", "נהוונד", intArrayOf(0, 2, 3, 5, 7, 8, 11), margin = 0.08),
-    HIJAZ("חיג'אז", "אהבה רבה, פריגי דומיננטי", intArrayOf(0, 1, 4, 5, 7, 8, 10)),
-    HIJAZ_KAR("חיג'אז כאר", "הרמוני כפול", intArrayOf(0, 1, 4, 5, 7, 8, 11), margin = 0.10),
-    KURD("כורד", "פריגי", intArrayOf(0, 1, 3, 5, 7, 8, 10)),
-    NIKRIZ("ניכריז", "", intArrayOf(0, 2, 3, 6, 7, 9, 10), margin = 0.06),
-    DORIAN("דורי", "", intArrayOf(0, 2, 3, 5, 7, 9, 10), margin = 0.06),
-    MIXOLYDIAN("מיקסולידי", "", intArrayOf(0, 2, 4, 5, 7, 9, 10), margin = 0.06),
-    RAST("ראסט", "קירוב, רבעי טון", intArrayOf(0, 2, 4, 5, 7, 9, 11), setOf(2, 6), null),
-    BAYATI("ביאתי", "קירוב, רבע טון", intArrayOf(0, 2, 3, 5, 7, 8, 10), setOf(1), null),
-    SABA("סבא", "קירוב, רבע טון", intArrayOf(0, 2, 3, 4, 7, 8, 10), setOf(1), null);
+    MAJOR("מז'ור", "עג'ם", ScaleGroup.REGULAR, intArrayOf(0, 2, 4, 5, 7, 9, 11), margin = 0.0, pickerName = "מז'ור רגיל"),
+    MINOR("מינור", "מינור טבעי", ScaleGroup.REGULAR, intArrayOf(0, 2, 3, 5, 7, 8, 10), margin = 0.0, pickerName = "מינור רגיל"),
+    HARMONIC_MINOR("מינור הרמוני", "נהוונד", ScaleGroup.REGULAR, intArrayOf(0, 2, 3, 5, 7, 8, 11), margin = 0.08),
+    HIJAZ("חיג'אז", "אהבה רבה, פריגי דומיננטי", ScaleGroup.EASTERN, intArrayOf(0, 1, 4, 5, 7, 8, 10)),
+    HIJAZ_KAR("חיג'אז כאר", "הרמוני כפול", ScaleGroup.EASTERN, intArrayOf(0, 1, 4, 5, 7, 8, 11), margin = 0.10),
+    KURD("כורד", "פריגי", ScaleGroup.EASTERN, intArrayOf(0, 1, 3, 5, 7, 8, 10)),
+    NIKRIZ("ניכריז", "", ScaleGroup.EASTERN, intArrayOf(0, 2, 3, 6, 7, 9, 10), margin = 0.06),
+    RAST("ראסט", "קירוב, רבעי טון", ScaleGroup.EASTERN, intArrayOf(0, 2, 4, 5, 7, 9, 11), setOf(2, 6), null),
+    BAYATI("ביאתי", "קירוב, רבע טון", ScaleGroup.EASTERN, intArrayOf(0, 2, 3, 5, 7, 8, 10), setOf(1), null),
+    SABA("סבא", "קירוב, רבע טון", ScaleGroup.EASTERN, intArrayOf(0, 2, 3, 4, 7, 8, 10), setOf(1), null),
+    DORIAN("דורי", "מינור עם דרגה 6 גבוהה", ScaleGroup.MODES, intArrayOf(0, 2, 3, 5, 7, 9, 10), margin = 0.06),
+    MIXOLYDIAN("מיקסולידי", "מז'ור עם דרגה 7 נמוכה", ScaleGroup.MODES, intArrayOf(0, 2, 4, 5, 7, 9, 10), margin = 0.06);
+
+    fun pickerLabel(): String {
+        val name = pickerName ?: hebrew
+        return if (description.isEmpty()) name else "$name  ($description)"
+    }
 }
 
 data class Key(val tonic: Int, val type: ScaleType) {

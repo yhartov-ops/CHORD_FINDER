@@ -7,17 +7,20 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioManager
 import android.os.Bundle
 import android.text.InputType
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -29,6 +32,7 @@ class MainActivity : Activity() {
 
     private val tracker = HarmonyTracker()
     private lateinit var capture: AudioCapture
+    private val player = Player()
 
     /** Chord the user picked (from the list or the search box); null = follow the live chord. */
     private var selectedChord: Chord? = null
@@ -66,15 +70,20 @@ class MainActivity : Activity() {
     private lateinit var guitarLabel: TextView
     private lateinit var guitarGrid: LinearLayout
     private lateinit var moreButton: Button
+    private lateinit var soundRow: LinearLayout
+    private var currentVoicing: GuitarVoicing? = null
+    private var currentDetailChord: Chord? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.statusBarColor = Palette.BG
         window.navigationBarColor = Palette.BG
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
+        volumeControlStream = AudioManager.STREAM_MUSIC
         capture = AudioCapture(
             onFrame = { frame ->
-                runOnUiThread {
+                // Don't analyse our own playback
+                if (!player.isPlaying()) runOnUiThread {
                     tracker.add(frame)
                     chromaView.update(frame.chroma, frame.levelDb)
                     refresh()
@@ -93,6 +102,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
+        player.stop()
         if (capture.isRunning) {
             capture.stop()
             updateListenButton()
@@ -146,19 +156,52 @@ class MainActivity : Activity() {
 
     // ---------- Key selection ----------
 
+    private class PickerRow(val label: String, val type: ScaleType?, val header: Boolean)
+
     private fun chooseKey() {
-        val types = ScaleType.values()
-        val labels = listOf("זיהוי אוטומטי") + types.map { t ->
-            if (t.description.isEmpty()) t.hebrew else "${t.hebrew}  (${t.description})"
+        val rows = ArrayList<PickerRow>()
+        rows.add(PickerRow("זיהוי אוטומטי", null, false))
+        for (g in ScaleGroup.values()) {
+            rows.add(PickerRow(g.hebrew, null, true))
+            for (t in ScaleType.values()) if (t.group == g) rows.add(PickerRow(t.pickerLabel(), t, false))
+        }
+        val adapter = object : BaseAdapter() {
+            override fun getCount() = rows.size
+            override fun getItem(position: Int) = rows[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun areAllItemsEnabled() = false
+            override fun isEnabled(position: Int) = !rows[position].header
+            override fun getViewTypeCount() = 2
+            override fun getItemViewType(position: Int) = if (rows[position].header) 1 else 0
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+                val r = rows[position]
+                val tv = (convertView as? TextView) ?: TextView(this@MainActivity)
+                tv.text = r.label
+                if (r.header) {
+                    tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    tv.setTextColor(Palette.AMBER)
+                    tv.typeface = Typeface.DEFAULT_BOLD
+                    tv.setPadding(dp(24), dp(18), dp(24), dp(6))
+                } else {
+                    tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+                    tv.setTextColor(Palette.TEXT)
+                    tv.typeface = Typeface.DEFAULT
+                    tv.setPadding(dp(24), dp(12), dp(24), dp(12))
+                }
+                return tv
+            }
         }
         AlertDialog.Builder(this)
-            .setTitle("סוג הסולם")
-            .setItems(labels.toTypedArray()) { _, which ->
-                if (which == 0) {
+            .setTitle("בחר סולם")
+            .setAdapter(adapter) { _, which ->
+                val r = rows[which]
+                if (r.header) return@setAdapter
+                val t = r.type
+                if (t == null) {
                     tracker.lockedKey = null
                     selectedChord = null
                     refresh()
-                } else chooseTonic(types[which - 1])
+                } else chooseTonic(t)
             }
             .show()
     }
@@ -182,6 +225,21 @@ class MainActivity : Activity() {
         chromaView.update(DoubleArray(12), -100.0)
         refresh()
     }
+
+    // ---------- Sound ----------
+
+    private fun playScale() {
+        val key = tracker.key
+        if (key == null) {
+            Toast.makeText(this, "אין עדיין סולם. השמע מוזיקה או בחר סולם.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        player.play { SynthMath.scale(key) }
+    }
+
+    private fun playGuitar(v: GuitarVoicing) = player.play { SynthMath.strum(v) }
+
+    private fun playPianoChord(c: Chord) = player.play { SynthMath.pianoChord(c) }
 
     // ---------- Chord search ----------
 
@@ -329,6 +387,9 @@ class MainActivity : Activity() {
             detailPiano.visibility = View.GONE
             guitarLabel.visibility = View.GONE
             moreButton.visibility = View.GONE
+            soundRow.visibility = View.GONE
+            currentVoicing = null
+            currentDetailChord = null
             return
         }
         val sp = if (chord == selectedChord && selectedSpelling != null) selectedSpelling!!
@@ -361,11 +422,15 @@ class MainActivity : Activity() {
                 spelling = sp
                 rootPc = chord.root
                 voicing = v
+                setOnClickListener { playGuitar(v) }
             }
             row!!.addView(g, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         }
         val rem = shown.size % 3
         if (rem != 0) repeat(3 - rem) { row!!.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f)) }
+        currentVoicing = all.firstOrNull()
+        currentDetailChord = chord
+        soundRow.visibility = View.VISIBLE
         moreButton.visibility = if (all.size > 3) View.VISIBLE else View.GONE
         moreButton.text = if (moreVoicings) "פחות אצבועים" else "עוד אצבועים"
     }
@@ -437,6 +502,8 @@ class MainActivity : Activity() {
         keyPanel.addView(quarterNote, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(4) })
         scalePiano = PianoView(this)
         keyPanel.addView(scalePiano, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(8) })
+        keyPanel.addView(smallButton("▶  השמע את הסולם בפסנתר") { playScale() },
+            LinearLayout.LayoutParams(MATCH_PARENT, dp(44)).apply { topMargin = dp(10) })
         root.addView(keyPanel, panelParams())
 
         // Live notes
@@ -500,9 +567,15 @@ class MainActivity : Activity() {
         detail.addView(detailTitle, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(14) })
         detailSub = text("", 14f, Palette.MUTED)
         detail.addView(detailSub)
+        soundRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; visibility = View.GONE }
+        soundRow.addView(smallButton("▶  השמע בגיטרה") { currentVoicing?.let { playGuitar(it) } },
+            LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(8) })
+        soundRow.addView(smallButton("▶  השמע בפסנתר") { currentDetailChord?.let { playPianoChord(it) } },
+            LinearLayout.LayoutParams(0, dp(44), 1f))
+        detail.addView(soundRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(12) })
         detailPiano = PianoView(this)
         detail.addView(detailPiano, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(14) })
-        guitarLabel = text("גיטרה", 13f, Palette.MUTED)
+        guitarLabel = text("גיטרה · הקש על תרשים כדי לשמוע אותו", 13f, Palette.MUTED)
         detail.addView(guitarLabel, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(16) })
         guitarGrid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         detail.addView(guitarGrid, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(6) })
